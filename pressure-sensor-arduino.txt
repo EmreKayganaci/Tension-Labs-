@@ -1,0 +1,370 @@
+/*
+ * Pressure Sensor Visualization and Logging System
+ * 
+ * This sketch reads data from 15 pressure sensors, displays colors based on pressure levels,
+ * logs data to an SD card in CSV format, and allows for screenshot export through serial.
+ * 
+ * Hardware requirements:
+ * - Arduino Mega (or similar with sufficient analog inputs)
+ * - 15 pressure sensors (connected to A0-A14)
+ * - TFT display (using Adafruit GFX and ILI9341 libraries)
+ * - SD card module (for data logging)
+ * - Button for screenshot capture (connected to pin 22)
+ */
+
+#include <SPI.h>
+#include <SD.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <TimeLib.h>
+
+// Pin Definitions
+#define TFT_CS    10
+#define TFT_DC    9
+#define SD_CS     4
+#define SCREENSHOT_BTN 22
+
+// Sensor pins (A0 to A14 for 15 sensors)
+const int sensorPins[15] = {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14};
+
+// Pressure thresholds for color mapping
+const int PRESSURE_LOW = 200;    // Green threshold
+const int PRESSURE_MED = 500;    // Yellow threshold
+const int PRESSURE_HIGH = 800;   // Red threshold
+
+// Initialize TFT display
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
+
+// File for data logging
+File dataFile;
+unsigned long lastLogTime = 0;
+const unsigned long LOG_INTERVAL = 1000; // Log every second
+
+// For tracking sensor values
+int sensorValues[15];
+char timeStamp[20];
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Wait for serial connection
+  while (!Serial && millis() < 3000);
+  
+  Serial.println(F("Pressure Sensor Visualization System"));
+  
+  // Initialize display
+  tft.begin();
+  tft.setRotation(3); // Landscape mode
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.println("Pressure Sensor System");
+  tft.println("Initializing...");
+  
+  // Initialize screenshot button
+  pinMode(SCREENSHOT_BTN, INPUT_PULLUP);
+  
+  // Initialize SD card
+  tft.println("Initializing SD card...");
+  if (!SD.begin(SD_CS)) {
+    tft.println("SD card initialization failed!");
+    Serial.println(F("SD card initialization failed!"));
+    // Continue without SD functionality
+  } else {
+    tft.println("SD card initialized.");
+    
+    // Create a new CSV file with header
+    createNewLogFile();
+  }
+  
+  // Draw initial sensor display layout
+  drawSensorLayout();
+  
+  delay(1000);
+}
+
+void loop() {
+  // Read all sensors
+  readSensors();
+  
+  // Update display with sensor data
+  updateDisplay();
+  
+  // Log data to SD card at regular intervals
+  if (millis() - lastLogTime >= LOG_INTERVAL) {
+    logDataToSD();
+    lastLogTime = millis();
+  }
+  
+  // Check for screenshot button press
+  if (digitalRead(SCREENSHOT_BTN) == LOW) {
+    captureScreenshot();
+    delay(500); // Debounce
+  }
+  
+  // Check for serial commands
+  checkSerialCommands();
+  
+  delay(100); // Small delay to prevent overwhelming the system
+}
+
+void readSensors() {
+  // Read values from all 15 sensors
+  for (int i = 0; i < 15; i++) {
+    sensorValues[i] = analogRead(sensorPins[i]);
+  }
+}
+
+void updateDisplay() {
+  // Update the display with all sensor values and colors
+  for (int i = 0; i < 15; i++) {
+    int x = (i % 5) * 64;
+    int y = 40 + (i / 5) * 60;
+    
+    // Draw sensor value
+    tft.setCursor(x + 5, y + 30);
+    tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    tft.print("    "); // Clear previous value
+    tft.setCursor(x + 5, y + 30);
+    tft.print(sensorValues[i]);
+    
+    // Update color indicator based on pressure
+    updateSensorColor(i, x, y);
+  }
+  
+  // Update timestamp
+  updateTimestamp();
+}
+
+void updateSensorColor(int sensorIndex, int x, int y) {
+  // Determine color based on pressure value
+  uint16_t color;
+  int value = sensorValues[sensorIndex];
+  
+  if (value < PRESSURE_LOW) {
+    color = ILI9341_GREEN;
+  } else if (value < PRESSURE_MED) {
+    color = ILI9341_YELLOW;
+  } else if (value < PRESSURE_HIGH) {
+    color = ILI9341_ORANGE;
+  } else {
+    color = ILI9341_RED;
+  }
+  
+  // Draw colored circle for sensor
+  tft.fillCircle(x + 25, y + 15, 10, color);
+  tft.drawCircle(x + 25, y + 15, 10, ILI9341_WHITE); // White outline
+}
+
+void drawSensorLayout() {
+  // Clear the screen
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // Draw title
+  tft.setCursor(10, 10);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.print("Pressure Sensor Monitoring");
+  
+  // Draw grid layout for 15 sensors
+  tft.setTextSize(1);
+  for (int i = 0; i < 15; i++) {
+    int x = (i % 5) * 64;
+    int y = 40 + (i / 5) * 60;
+    
+    // Draw sensor number
+    tft.setCursor(x + 5, y);
+    tft.print("S");
+    tft.print(i + 1);
+    
+    // Draw initial empty circle
+    tft.drawCircle(x + 25, y + 15, 10, ILI9341_WHITE);
+  }
+  
+  // Draw legend
+  int legendY = 220;
+  tft.setCursor(10, legendY);
+  tft.print("Legend:");
+  
+  // Green - Low pressure
+  tft.fillCircle(80, legendY, 5, ILI9341_GREEN);
+  tft.setCursor(90, legendY - 2);
+  tft.print("Low");
+  
+  // Yellow - Medium pressure
+  tft.fillCircle(130, legendY, 5, ILI9341_YELLOW);
+  tft.setCursor(140, legendY - 2);
+  tft.print("Medium");
+  
+  // Orange - High pressure
+  tft.fillCircle(200, legendY, 5, ILI9341_ORANGE);
+  tft.setCursor(210, legendY - 2);
+  tft.print("High");
+  
+  // Red - Very high pressure
+  tft.fillCircle(260, legendY, 5, ILI9341_RED);
+  tft.setCursor(270, legendY - 2);
+  tft.print("Very High");
+}
+
+void updateTimestamp() {
+  // Get current runtime in seconds
+  unsigned long seconds = millis() / 1000;
+  unsigned long minutes = seconds / 60;
+  unsigned long hours = minutes / 60;
+  
+  seconds %= 60;
+  minutes %= 60;
+  
+  // Format timestamp
+  sprintf(timeStamp, "%02lu:%02lu:%02lu", hours, minutes, seconds);
+  
+  // Display timestamp
+  tft.setCursor(200, 10);
+  tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  tft.setTextSize(2);
+  tft.print(timeStamp);
+}
+
+void createNewLogFile() {
+  // Create a unique filename based on millis
+  char filename[20];
+  sprintf(filename, "PRES_%lu.CSV", millis() % 100000);
+  
+  dataFile = SD.open(filename, FILE_WRITE);
+  if (dataFile) {
+    // Write CSV header
+    dataFile.println("Timestamp,S1,S2,S3,S4,S5,S6,S7,S8,S9,S10,S11,S12,S13,S14,S15");
+    dataFile.close();
+    
+    Serial.print(F("Created log file: "));
+    Serial.println(filename);
+  } else {
+    Serial.println(F("Error creating log file!"));
+  }
+}
+
+void logDataToSD() {
+  // Format timestamp
+  updateTimestamp();
+  
+  // Open the data file
+  char filename[20];
+  sprintf(filename, "PRES_%lu.CSV", millis() % 100000);
+  
+  dataFile = SD.open(filename, FILE_WRITE);
+  if (dataFile) {
+    // Write timestamp
+    dataFile.print(timeStamp);
+    
+    // Write all sensor values
+    for (int i = 0; i < 15; i++) {
+      dataFile.print(",");
+      dataFile.print(sensorValues[i]);
+    }
+    dataFile.println();
+    dataFile.close();
+  } else {
+    Serial.println(F("Error opening log file!"));
+  }
+}
+
+void captureScreenshot() {
+  // Indicate screenshot is being taken
+  tft.fillRect(0, 230, 320, 10, ILI9341_BLUE);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setCursor(10, 230);
+  tft.print("Capturing screenshot...");
+  
+  // Send screenshot data over serial
+  Serial.println(F("SCREENSHOT_BEGIN"));
+  
+  // Send timestamp for filename
+  Serial.print(F("TIME:"));
+  Serial.println(timeStamp);
+  
+  // Send all sensor data in compact format
+  Serial.print(F("DATA:"));
+  for (int i = 0; i < 15; i++) {
+    if (i > 0) Serial.print(",");
+    Serial.print(sensorValues[i]);
+  }
+  Serial.println();
+  
+  // Signal end of screenshot
+  Serial.println(F("SCREENSHOT_END"));
+  
+  // Clear status message
+  tft.fillRect(0, 230, 320, 10, ILI9341_BLACK);
+  
+  // Flash screen to indicate screenshot complete
+  tft.fillScreen(ILI9341_WHITE);
+  delay(100);
+  drawSensorLayout();
+  updateDisplay();
+}
+
+void checkSerialCommands() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command == "SCREENSHOT") {
+      captureScreenshot();
+    } 
+    else if (command == "EXPORT_CSV") {
+      exportCSV();
+    }
+    else if (command == "HELP") {
+      printHelp();
+    }
+  }
+}
+
+void exportCSV() {
+  // Find and export the CSV file over serial
+  File root = SD.open("/");
+  
+  // Look for CSV files
+  File entry = root.openNextFile();
+  
+  Serial.println(F("CSV_EXPORT_BEGIN"));
+  
+  bool found = false;
+  while (entry) {
+    String filename = entry.name();
+    if (filename.endsWith(".CSV") || filename.endsWith(".csv")) {
+      found = true;
+      
+      Serial.print(F("FILENAME:"));
+      Serial.println(filename);
+      
+      // Open and read the file
+      File dataFile = SD.open(filename);
+      if (dataFile) {
+        while (dataFile.available()) {
+          Serial.write(dataFile.read());
+        }
+        dataFile.close();
+      }
+      
+      Serial.println();
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  
+  if (!found) {
+    Serial.println(F("No CSV files found"));
+  }
+  
+  Serial.println(F("CSV_EXPORT_END"));
+  root.close();
+}
+
+void printHelp() {
+  Serial.println(F("Available Commands:"));
+  Serial.println(F("SCREENSHOT - Capture and send screenshot data"));
+  Serial.println(F("EXPORT_CSV - Export all CSV files"));
+  Serial.println(F("HELP - Show this help message"));
+}
